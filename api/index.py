@@ -55,7 +55,7 @@ LOCALITY_INFO = {
     "Hebbal": {"lat":13.0358, "lon":77.5970, "population_density_score":7, "construction_index":5, "tanker_cost_index":7},
     "Banashankari": {"lat":12.9300, "lon":77.5600, "population_density_score":7, "construction_index":4, "tanker_cost_index":6},
     "Banashankari 3rd stage": {"lat":12.9160, "lon":77.5450, "population_density_score":7, "construction_index":5, "tanker_cost_index":6},
-    "Basaveshwaranagar": {"lat":12.9910, "tum":77.5400, "population_density_score":7, "construction_index":4, "tanker_cost_index":6},
+    "Basaveshwaranagar": {"lat":12.9910, "lon":77.5400, "population_density_score":7, "construction_index":4, "tanker_cost_index":6},
     "Kalyan Nagar": {"lat":13.0180, "lon":77.6400, "population_density_score":7, "construction_index":6, "tanker_cost_index":7},
     "Kengeri": {"lat":12.9143, "lon":77.4827, "population_density_score":6, "construction_index":6, "tanker_cost_index":6},
     "RR Nagar": {"lat":12.9270, "lon":77.5150, "population_density_score":6, "construction_index":5, "tanker_cost_index":6},
