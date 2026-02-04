@@ -1,6 +1,6 @@
-import joblib
-import pandas as pd
+import xgboost as xgb
 import numpy as np
+import joblib
 import requests
 from datetime import datetime, timedelta
 import os
@@ -14,16 +14,9 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="AquaEarth Weekly Water Shortage Forecast API")
+app = FastAPI(title="AquaEarth Weekly Water Shortage Forecast API (Optimized)")
 
-@app.middleware("http")
-async def log_requests(request, call_next):
-    logger.info(f"Incoming request: {request.method} {request.url}")
-    response = await call_next(request)
-    logger.info(f"Status: {response.status_code}")
-    return response
-
-# Enable CORS for frontend communication
+# Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -32,19 +25,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load artifacts using absolute paths relative to this file
+# Load artifacts
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(BASE_DIR, "models", "water_week_xgb_model.pkl")
-LE_PATH = os.path.join(BASE_DIR, "models", "week_label_encoder.pkl")
+MODEL_PATH = os.path.join(BASE_DIR, "models", "xgb_model.json")
+CAT_PATH = os.path.join(BASE_DIR, "models", "categories.pkl")
+LABEL_PATH = os.path.join(BASE_DIR, "models", "labels.pkl")
 
-if os.path.exists(MODEL_PATH) and os.path.exists(LE_PATH):
-    model = joblib.load(MODEL_PATH)
-    le = joblib.load(LE_PATH)
-    logger.info("✅ Model & Label Encoder loaded")
+# Load model and meta
+if os.path.exists(MODEL_PATH):
+    model = xgb.XGBClassifier()
+    model.load_model(MODEL_PATH)
+    categories = joblib.load(CAT_PATH)
+    labels = joblib.load(LABEL_PATH)
+    logger.info("✅ Optimized Model & Meta loaded")
 else:
     model = None
-    le = None
-    logger.warning(f"⚠️ Model or Label Encoder not found at {MODEL_PATH}")
+    logger.warning(f"⚠️ Model not found at {MODEL_PATH}")
 
 LOCALITY_INFO = {
     "Whitefield": {"lat":12.9698, "lon":77.7500, "population_density_score":9, "construction_index":9, "tanker_cost_index":9},
@@ -59,7 +55,7 @@ LOCALITY_INFO = {
     "Hebbal": {"lat":13.0358, "lon":77.5970, "population_density_score":7, "construction_index":5, "tanker_cost_index":7},
     "Banashankari": {"lat":12.9300, "lon":77.5600, "population_density_score":7, "construction_index":4, "tanker_cost_index":6},
     "Banashankari 3rd stage": {"lat":12.9160, "lon":77.5450, "population_density_score":7, "construction_index":5, "tanker_cost_index":6},
-    "Basaveshwaranagar": {"lat":12.9910, "lon":77.5400, "population_density_score":7, "construction_index":4, "tanker_cost_index":6},
+    "Basaveshwaranagar": {"lat":12.9910, "tum":77.5400, "population_density_score":7, "construction_index":4, "tanker_cost_index":6},
     "Kalyan Nagar": {"lat":13.0180, "lon":77.6400, "population_density_score":7, "construction_index":6, "tanker_cost_index":7},
     "Kengeri": {"lat":12.9143, "lon":77.4827, "population_density_score":6, "construction_index":6, "tanker_cost_index":6},
     "RR Nagar": {"lat":12.9270, "lon":77.5150, "population_density_score":6, "construction_index":5, "tanker_cost_index":6},
@@ -103,70 +99,73 @@ def fetch_last30_days_weather(lat, lon, end_date):
         "rainfall_30d_mm": round(float(rain.sum()), 1),
         "rainfall_last7d_mm": round(float(rain[-7:].sum()), 1),
         "temperature_avg_c": round(float(temp_mean.mean()), 1),
-        "temperature_std_c": round(float(temp_mean.std()), 1),
+        "temperature_std_c": round(float(np.std(temp_mean)), 1),
         "heatwave_days_30d": int((temp_max > 35).sum()),
         "dry_spell_days_30d": int((rain < 1.0).sum())
     }
 
-@app.get("/")
-def home():
-    return {"status": "ok", "message": "AquaEarth XGBoost Forecast API on Vercel"}
+def get_prediction(req, weather, dt, loc_info):
+    ratio = req.avg_supply_liters / max(req.avg_demand_liters, 1)
+    
+    # Numerical features in order:
+    # household_size,usage_per_person_lpd,rainfall_30d_mm,rainfall_last7d_mm,temperature_avg_c,
+    # temperature_std_c,heatwave_days_30d,dry_spell_days_30d,population_density_score,construction_index,
+    # tanker_cost_index,avg_demand_liters,avg_supply_liters,avg_supply_demand_ratio,avg_supply_hours,
+    # tanker_trips_30d,tanker_days_30d,day,month,weekday
+    
+    num_features = [
+        req.household_size,
+        req.usage_per_person_lpd,
+        weather["rainfall_30d_mm"],
+        weather["rainfall_last7d_mm"],
+        weather["temperature_avg_c"],
+        weather["temperature_std_c"],
+        weather["heatwave_days_30d"],
+        weather["dry_spell_days_30d"],
+        loc_info["population_density_score"],
+        loc_info["construction_index"],
+        loc_info["tanker_cost_index"],
+        req.avg_demand_liters,
+        req.avg_supply_liters,
+        round(float(ratio), 3),
+        req.avg_supply_hours,
+        req.tanker_trips_30d,
+        req.tanker_days_30d,
+        int(dt.day),
+        int(dt.month),
+        int(dt.weekday())
+    ]
+    
+    # One-hot locality
+    oh = [1.0 if c == req.locality else 0.0 for c in categories]
+    
+    X_input = np.array(oh + num_features).reshape(1, -1)
+    
+    # Predict
+    pred_enc = model.predict(X_input)[0]
+    pred_label = labels[int(pred_enc)]
+    
+    proba = model.predict_proba(X_input)[0]
+    probs = {cls: float(p) for cls, p in zip(labels, proba)}
+    
+    return pred_label, probs
 
-@app.get("/api/weather")
-@app.get("/weather")
-def get_weather(locality: str = Query(...), prediction_date: str = Query(...)):
-    if locality not in LOCALITY_INFO:
-        return {"error": "Locality not supported"}
-    dt = pd.to_datetime(prediction_date)
-    info = LOCALITY_INFO[locality]
-    weather = fetch_last30_days_weather(info["lat"], info["lon"], dt.to_pydatetime())
-    return {"locality": locality, "weather": weather}
+@app.get("/")
+@app.get("/api")
+def home():
+    return {"status": "ok", "message": "AquaEarth Optimized API"}
 
 @app.post("/api/predict_week")
 @app.post("/predict_week")
 def predict_week(req: PredictRequest):
-    if model is None:
-        return {"error": "Model not loaded."}
-    
-    if req.locality not in LOCALITY_INFO:
-        return {"error": "Locality not supported"}
+    if model is None: return {"error": "Model not loaded."}
+    if req.locality not in LOCALITY_INFO: return {"error": "Locality not supported"}
 
     loc_info = LOCALITY_INFO[req.locality]
-    dt = pd.to_datetime(req.prediction_date)
-    weather = fetch_last30_days_weather(loc_info["lat"], loc_info["lon"], dt.to_pydatetime())
+    dt = datetime.strptime(req.prediction_date, "%Y-%m-%d")
+    weather = fetch_last30_days_weather(loc_info["lat"], loc_info["lon"], dt)
     
-    ratio = req.avg_supply_liters / max(req.avg_demand_liters, 1)
-
-    X = {
-        "locality": req.locality,
-        "household_size": req.household_size,
-        "usage_per_person_lpd": req.usage_per_person_lpd,
-        "rainfall_30d_mm": weather["rainfall_30d_mm"],
-        "rainfall_last7d_mm": weather["rainfall_last7d_mm"],
-        "temperature_avg_c": weather["temperature_avg_c"],
-        "temperature_std_c": weather["temperature_std_c"],
-        "heatwave_days_30d": weather["heatwave_days_30d"],
-        "dry_spell_days_30d": weather["dry_spell_days_30d"],
-        "population_density_score": loc_info["population_density_score"],
-        "construction_index": loc_info["construction_index"],
-        "tanker_cost_index": loc_info["tanker_cost_index"],
-        "avg_demand_liters": req.avg_demand_liters,
-        "avg_supply_liters": req.avg_supply_liters,
-        "avg_supply_demand_ratio": round(float(ratio), 3),
-        "avg_supply_hours": req.avg_supply_hours,
-        "tanker_trips_30d": req.tanker_trips_30d,
-        "tanker_days_30d": req.tanker_days_30d,
-        "month": int(dt.month),
-        "day": int(dt.day),
-        "weekday": int(dt.weekday())
-    }
-
-    X_input = pd.DataFrame([X])
-    pred_enc = model.predict(X_input)[0]
-    pred_label = le.inverse_transform([pred_enc])[0]
-    
-    proba = model.predict_proba(X_input)[0]
-    probs = {cls: float(p) for cls, p in zip(le.classes_, proba)}
+    pred_label, probs = get_prediction(req, weather, dt, loc_info)
 
     return {
         "week_prediction": pred_label,
@@ -181,25 +180,19 @@ def predict_week(req: PredictRequest):
 def fetch_forecast_weather(lat, lon):
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
-        "latitude": lat,
-        "longitude": lon,
+        "latitude": lat, "longitude": lon,
         "daily": "temperature_2m_max,temperature_2m_min,temperature_2m_mean,precipitation_sum",
-        "timezone": "Asia/Kolkata",
-        "past_days": 31
+        "timezone": "Asia/Kolkata", "past_days": 31
     }
     r = requests.get(url, params=params, timeout=25)
     r.raise_for_status()
-    data = r.json()["daily"]
-    return data
+    return r.json()["daily"]
 
 @app.post("/api/forecast_7day")
 @app.post("/forecast_7day")
 def forecast_7day(req: PredictRequest):
-    if model is None:
-        return {"error": "Model not loaded"}
-    
-    if req.locality not in LOCALITY_INFO:
-        return {"error": "Locality not supported"}
+    if model is None: return {"error": "Model not loaded"}
+    if req.locality not in LOCALITY_INFO: return {"error": "Locality not supported"}
 
     loc_info = LOCALITY_INFO[req.locality]
     weather_data = fetch_forecast_weather(loc_info["lat"], loc_info["lon"])
@@ -210,10 +203,8 @@ def forecast_7day(req: PredictRequest):
     rain = np.array(weather_data["precipitation_sum"])
 
     results = []
-    
     for i in range(31, 38):
-        dt = pd.to_datetime(dates[i])
-        
+        dt = datetime.strptime(dates[i], "%Y-%m-%d")
         window_rain = rain[i-29 : i+1]
         window_temp = temp_mean[i-29 : i+1]
         window_temp_max = temp_max[i-29 : i+1]
@@ -222,43 +213,13 @@ def forecast_7day(req: PredictRequest):
             "rainfall_30d_mm": round(float(window_rain.sum()), 1),
             "rainfall_last7d_mm": round(float(window_rain[-7:].sum()), 1),
             "temperature_avg_c": round(float(window_temp.mean()), 1),
-            "temperature_std_c": round(float(window_temp.std()), 1),
+            "temperature_std_c": round(float(np.std(window_temp)), 1),
             "heatwave_days_30d": int((window_temp_max > 35).sum()),
             "dry_spell_days_30d": int((window_rain < 1.0).sum())
         }
 
-        ratio = req.avg_supply_liters / max(req.avg_demand_liters, 1)
-
-        X = {
-            "locality": req.locality,
-            "household_size": req.household_size,
-            "usage_per_person_lpd": req.usage_per_person_lpd,
-            "rainfall_30d_mm": w_features["rainfall_30d_mm"],
-            "rainfall_last7d_mm": w_features["rainfall_last7d_mm"],
-            "temperature_avg_c": w_features["temperature_avg_c"],
-            "temperature_std_c": w_features["temperature_std_c"],
-            "heatwave_days_30d": w_features["heatwave_days_30d"],
-            "dry_spell_days_30d": w_features["dry_spell_days_30d"],
-            "population_density_score": loc_info["population_density_score"],
-            "construction_index": loc_info["construction_index"],
-            "tanker_cost_index": loc_info["tanker_cost_index"],
-            "avg_demand_liters": req.avg_demand_liters,
-            "avg_supply_liters": req.avg_supply_liters,
-            "avg_supply_demand_ratio": round(float(ratio), 3),
-            "avg_supply_hours": req.avg_supply_hours,
-            "tanker_trips_30d": req.tanker_trips_30d,
-            "tanker_days_30d": req.tanker_days_30d,
-            "month": int(dt.month),
-            "day": int(dt.day),
-            "weekday": int(dt.weekday())
-        }
-
-        X_input = pd.DataFrame([X])
-        pred_enc = model.predict(X_input)[0]
-        pred_label = le.inverse_transform([pred_enc])[0]
-        
-        proba = model.predict_proba(X_input)[0]
-        risk_score = round(float(proba[pred_enc]) * 100)
+        pred_label, probs = get_prediction(req, w_features, dt, loc_info)
+        risk_score = round(float(probs[pred_label]) * 100)
 
         results.append({
             "date": dates[i],

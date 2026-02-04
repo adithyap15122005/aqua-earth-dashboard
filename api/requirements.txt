@@ -1,11 +1,8 @@
 fastapi
-uvicorn
 xgboost
-pandas
-pydantic
+numpy
 joblib
 requests
-scikit-learn
-numpy
+pydantic
 python-multipart
-cors
+# Removed pandas and scikit-learn to stay under Vercel's 300MB zip limit
